@@ -25,13 +25,22 @@ function StripePdfInvoice(key, conf) {
 StripePdfInvoice.prototype.generate = function(invoiceId, data, callback) {
     async.parallel({
         invoice: function(parallelCallback){
-            if(!invoiceId)
+            if(!invoiceId) {
                 parallelCallback({message : 'Missing invoice id'});
-            else
-                stripe.invoices.retrieve(
-                    invoiceId,
-                    parallelCallback
-                );
+            } else {
+                if(data.headers) {
+                    stripe.invoices.retrieve(
+                        invoiceId,
+                        data.headers,
+                        parallelCallback
+                    );
+                } else {
+                    stripe.invoices.retrieve(
+                        invoiceId,
+                        parallelCallback
+                    );
+                }
+            }
         }
     }, function(error, results){
         if(!error && results && results.invoice)

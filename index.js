@@ -156,8 +156,8 @@ StripePdfInvoice.prototype.generate = function(invoiceId, data, callback) {
 
             callback(null, invoice.pdf_name, wkhtmltopdf(html, {
                 pageSize: 'letter',
-                disableSmartShrinking: true,
-                zoom: 3.0
+                // disableSmartShrinking: true,
+                // zoom: 3.0
             }));
         }
         else

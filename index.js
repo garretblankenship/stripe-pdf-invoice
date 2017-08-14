@@ -22,6 +22,38 @@ function StripePdfInvoice(key, conf) {
     config = conf;
 };
 
+function associateChargeAndTransaction(headers, parallelCallback) {
+    return function(err, invoice) {
+        if (err) {
+            return parallelCallback(err, invoice);
+        }
+        
+        if (!invoice.charge) {
+            return parallelCallback(null, invoice);
+        }
+
+        if (!headers) {
+            headers = {};
+        }
+        
+        return stripe.charges.retrieve(invoice.charge, headers, function(err, charge) {
+            if (err) {
+                return parallelCallback(err, invoice);
+            }
+
+            invoice.charge = charge;
+            return stripe.balance.retrieveTransaction(invoice.charge.balance_transaction, headers, function(err, transaction) {
+                if (err) {
+                    return parallelCallback(err, invoice);
+                }
+
+                invoice.transaction = transaction;
+                return parallelCallback(null, invoice);
+            });
+        });
+    }
+}
+
 StripePdfInvoice.prototype.generate = function(invoiceId, data, callback) {
     async.parallel({
         invoice: function(parallelCallback){
@@ -32,22 +64,22 @@ StripePdfInvoice.prototype.generate = function(invoiceId, data, callback) {
                     stripe.invoices.retrieve(
                         invoiceId,
                         data.headers,
-                        parallelCallback
+                        associateChargeAndTransaction(data.headers, parallelCallback)
                     );
                 } else {
                     stripe.invoices.retrieve(
                         invoiceId,
-                        parallelCallback
+                        associateChargeAndTransaction(parallelCallback)
                     );
                 }
             }
         }
     }, function(error, results){
         if(!error && results && results.invoice)
-        {
+        {                       
             var invoice = _.extend({}, config, data, results.invoice);
             invoice.currency_symbol = invoice.currency_symbol || '$';
-            invoice.label_invoice = invoice.label_invoice || 'invoice';
+            invoice.label_invoice = invoice.label_invoice || 'tax invoice';
             invoice.label_invoice_to = invoice.label_invoice_to || 'invoice to';
             invoice.label_invoice_by = invoice.label_invoice_by || 'invoice by';
             invoice.label_due_on = invoice.label_due_on || 'Due on';
@@ -57,8 +89,9 @@ StripePdfInvoice.prototype.generate = function(invoiceId, data, callback) {
             invoice.label_price = invoice.label_price || 'price (' + invoice.currency_symbol + ')';
             invoice.label_amount = invoice.label_amount || 'Amount';
             invoice.label_subtotal = invoice.label_subtotal || 'subtotal';
-            invoice.label_total = invoice.label_total || 'total';
-            invoice.label_vat = invoice.label_vat || 'vat';
+            invoice.label_total = invoice.label_total || 'net total';
+            invoice.label_vat = invoice.label_vat || 'gst';
+            invoice.label_fee = invoice.label_fee || 'fees';
             invoice.label_invoice_by = invoice.label_invoice_by || 'invoice by';
             invoice.label_invoice_date = invoice.label_invoice_date || 'invoice date';
             invoice.label_company_siret = invoice.label_company_siret || 'Company SIRET';
@@ -66,10 +99,12 @@ StripePdfInvoice.prototype.generate = function(invoiceId, data, callback) {
             invoice.label_invoice_number = invoice.label_invoice_number || 'invoice number';
             invoice.label_reference_number = invoice.label_reference_number || 'ref N°';
             invoice.label_invoice_due_date = invoice.label_invoice_due_date || 'Due date';
-            invoice.company_name = invoice.company_name || 'My company';
-            invoice.date_format = invoice.date_format || 'MMMM Do, YYYY';
+            invoice.label_tax_in_total = invoice.label_tax_in_total || 'Tax in total'
+            invoice.company_name = invoice.company_name || 'My company - abn';
+            invoice.provider_name = invoice.provider_name || '';
+            invoice.date_format = invoice.date_format || 'Do MMMM, YYYY';
             invoice.client_company_name = invoice.client_company_name || 'Client Company';
-            invoice.number = invoice.number || '12345';
+            invoice.number = invoice.id || '12345';
             invoice.currency_position_before = invoice.currency_position_before || true;
             invoice.date_formated = moment.unix(invoice.date).locale(invoice.language || 'en').format(invoice.date_format);
             if(invoice.due_days && !isNaN(invoice.due_days))
@@ -87,11 +122,12 @@ StripePdfInvoice.prototype.generate = function(invoiceId, data, callback) {
             else
                 invoice.company_logo = null;
             _.each(invoice.lines.data, function(line){
-                if(line.type == 'subscription')
-                    line.price = (line.plan.amount/100).toFixed(2);
-                else
-                    line.price = (line.amount/100).toFixed(2);
-                line.amount = (line.amount/100).toFixed(2);
+                if(line.type == 'subscription'){
+                    line.price = (line.plan.amount/100 * (invoice.tax_percent/100 + 1)).toFixed(2);
+                } else {
+                    line.price = (line.amount/100 * (invoice.tax_percent/100 + 1)).toFixed(2);
+                }
+                line.amount = (line.amount/100 * (invoice.tax_percent/100 + 1)).toFixed(2);
                 if(!line.description && line.type == 'subscription')
                 {
                     line.description = ((line.quantity > 1) ? line.quantity + ' * ' : '') + line.plan.name;
@@ -103,10 +139,12 @@ StripePdfInvoice.prototype.generate = function(invoiceId, data, callback) {
                     }
                 }
             });
-            invoice.total = (invoice.total/100).toFixed(2);
-            invoice.subtotal = (invoice.subtotal/100).toFixed(2);
+            invoice.fee = (invoice.transaction.fee/100).toFixed(2);
+            invoice.subtotal = (invoice.total/100).toFixed(2);
             invoice.tax_percent = invoice.tax_percent || 0;
-
+            invoice.tax = (invoice.tax/100).toFixed(2);
+            invoice.tax_in_total = (((invoice.total - invoice.transaction.fee) / invoice.total) * invoice.tax).toFixed(2);
+            invoice.total = ((invoice.total - invoice.transaction.fee)/100).toFixed(2);
 
             var html = jade.renderFile(path.resolve(__dirname + '/templates/invoice.jade'), {
                 invoice : invoice,
@@ -115,7 +153,12 @@ StripePdfInvoice.prototype.generate = function(invoiceId, data, callback) {
                     path.resolve(path.resolve(__dirname + '/css/foundation.min.css'))
                 ]
             });
-            callback(null, invoice.pdf_name, wkhtmltopdf(html, {pageSize: 'letter'}));
+
+            callback(null, invoice.pdf_name, wkhtmltopdf(html, {
+                pageSize: 'letter',
+                disableSmartShrinking: true,
+                zoom: 3.0
+            }));
         }
         else
             callback(error);
